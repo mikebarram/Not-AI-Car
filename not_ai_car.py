@@ -1,37 +1,67 @@
 # import the pygame module, so you can use it
 from asyncio.windows_events import NULL
+from curses import KEY_LEFT
 import pygame, sys
 import numpy as np
 import random
 import math
 from scipy.interpolate import splprep, splev
-from scipy.ndimage.filters import uniform_filter1d
+from scipy.ndimage import uniform_filter1d
+from collections import deque
+#from functools import cache
 
 BLACK = (0, 0, 0)
 WHITE = (200, 200, 200)
 RED = (255, 0, 0)
+GREEN = (0, 255, 0)
 START_COLOUR = (200, 200, 0)
 SQUARE_SIZE = 130
 ROWS = 6
 COLS = 10
 TRACK_MIN_WIDTH = 15
-TRACK_MAX_WIDTH = 45
-TRACK_CURVE_POINTS = ROWS * COLS * 10
+TRACK_MAX_WIDTH = 42
+TRACK_CURVE_POINTS = ROWS * COLS * SQUARE_SIZE // 5
 TRACK_MIDLINE_COLOUR = WHITE
 
 WINDOW_WIDTH = COLS * SQUARE_SIZE
 WINDOW_HEIGHT = ROWS * SQUARE_SIZE
 
 # cars can only look so far ahead. Needs to be somewhat larger than the maximum track width - try seting that distance to the size of a grid square
-CAR_VISION_DISTANCE = round(2.5 * SQUARE_SIZE)
+CAR_VISION_DISTANCE = round(3.0 * SQUARE_SIZE)
 #CAR_VISION_ANGLES = (0, -10, 10, -20, 20, -30, 30, -45, 45, -60, 60, -80, 80, -90, 90) # 0 must be first
 CAR_VISION_ANGLES = (0, -20, 20, -45, 45, -60, 60, -90, 90) # 0 must be first
-CAR_SPEED_MIN = 2 # pixels per frame
-CAR_SPEED_MAX = 15 # pixels per frame
-CAR_ACCELERATION_MIN = -4 # change in speed in pixels per frame
-CAR_ACCELERATION_MAX = 2 # change in speed in pixels per frame
+CAR_VISION_ANGLES = (0, -20, 20, -45, 45, -60, 60) # 0 must be first
+CAR_SPEED_MIN_INITIAL = 4 # pixels per frame
+CAR_SPEED_MAX_INITIAL = 15 # pixels per frame
+CAR_SPEED_MIN = CAR_SPEED_MIN_INITIAL # pixels per frame
+CAR_SPEED_MAX = CAR_SPEED_MAX_INITIAL # pixels per frame
+CAR_ACCELERATION_MIN = -6 # change in speed in pixels per frame
+CAR_ACCELERATION_MAX = 5 # change in speed in pixels per frame
+CAR_STEERING_RADIANS_MAX = math.radians(30)
+CAR_STEERING_RADIANS_DELTA_MAX = math.radians(45)
 CAR_PATH_COLOUR = RED
-        
+CAR_COLOUR = GREEN
+
+
+class CarIcon(pygame.sprite.Sprite):
+    def __init__(self, pos_x, pos_y):
+        super().__init__()
+        self.image = pygame.image.load("images/green-car.png") #38x76
+        self.rect = self.image.get_rect()
+        self.rect.center = [pos_x,pos_y]
+        self.image_original = self.image
+        self.rect_original = self.rect
+
+    def update(self, pos_x, pos_y, angle_radians):
+        self.image, self.rect = self.rot_center(self.image_original, self.rect_original, angle_radians)
+        self.rect.center = [pos_x,pos_y]
+
+    def rot_center(self, image, rect, angle_radians):
+        # rotate an image while keeping its center"""
+        rot_image = pygame.transform.rotate(image, 270 - math.degrees(angle_radians))
+        rot_rect = rot_image.get_rect(center=rect.center)
+        return rot_image,rot_rect
+    
 class Car():
     def __init__(self, screen, track):
         self.screen = screen
@@ -53,11 +83,36 @@ class Car():
         self.direction_radians = track.GetInitialDirectionRadians()
         self.steering_radians = 0
         self.crashed = False
+        self.position_previous_rounded = self.position_rounded
+        
+        self.statsInfo = {
+            "distance":0.0,
+            "frames":0,
+            "average speed":0.0,
+            "rotations":0.0,
+            "CAR_SPEED_MIN":CAR_SPEED_MIN,
+            "CAR_SPEED_MAX":CAR_SPEED_MAX
+            }
+
+        self.instructions = {
+            "speed":0.0,
+            "speed_delta":0.0,
+            "direction_radians":0.0,
+            "steering_radians":0.0,
+            }
+        self.latestInstructions = deque(maxlen=20)
+        
+        self.carIcon = CarIcon(self.position_rounded[0],self.position_rounded[1])
+        self.carIconGroup = pygame.sprite.Group()
+        self.carIconGroup.add(self.carIcon)
 
     def Drive(self):
         track_edge_distances = self.GetTrackEdgeDistances(False)
         if self.crashed:
             return
+        
+        self.position_previous_rounded = self.position_rounded
+
         # in future, do some neural network magic to decide how much to steer and how much to change speed
         # for now, get the change in speed, based on how clear the road is straight ahead
         distance_ahead = track_edge_distances[0][1] # how far is clear straight ahead
@@ -79,14 +134,30 @@ class Car():
         
         self.speed = speed_new
 
+        steering_radians_previous = self.steering_radians
         steering_angle_new = 0
+        max_track_distance = 1
         if distance_ahead < CAR_VISION_DISTANCE / 1.8:        
             for ted in track_edge_distances:
                 if ted[0] == 0:
                     continue
                 steering_angle_new += ted[1] / ted[0]
+                if ted[1] > max_track_distance: max_track_distance = ted[1]
 
-        self.steering_radians = steering_angle_new / 20
+        self.steering_radians = 5 * steering_angle_new / max_track_distance
+
+        # restrict how much the steering can be changed per frame
+        if self.steering_radians < steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX:
+            self.steering_radians = steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX
+        elif self.steering_radians > steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX:
+            self.steering_radians = steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX
+
+        # restrict how much the steering can be per frame
+        if self.steering_radians > CAR_STEERING_RADIANS_MAX:
+            self.steering_radians = CAR_STEERING_RADIANS_MAX
+        elif self.steering_radians < -CAR_STEERING_RADIANS_MAX:
+            self.steering_radians = -CAR_STEERING_RADIANS_MAX
+
         self.direction_radians += self.steering_radians #* self.speed # direction changes more per frame if you're goig faster
 
         self.position = (self.position[0] + self.speed * math.cos(self.direction_radians), self.position[1] + self.speed * math.sin(self.direction_radians))
@@ -95,7 +166,27 @@ class Car():
         car_speed_colour = round(255 * self.speed / CAR_SPEED_MAX)
         car_colour = (255 - car_speed_colour, car_speed_colour, 0)
         self.screen.set_at(self.position_rounded, car_colour)
+        pygame.display.update(pygame.Rect(self.position_rounded[0],self.position_rounded[1],1,1))
+        pygame.display.update()
+        
+        #self.carIconGroup.draw(self.screen)
+        self.carIconGroup.update(self.position_rounded[0], self.position_rounded[1], self.direction_radians)
+        
+        self.statsInfo["frames"] += 1
+        self.statsInfo["distance"] += speed_new
+        self.statsInfo["average speed"] = self.statsInfo["distance"] // self.statsInfo["frames"]
+        self.statsInfo["rotations"] += self.steering_radians / (2 * math.pi)
+        self.statsInfo["CAR_SPEED_MIN"] = CAR_SPEED_MIN
+        self.statsInfo["CAR_SPEED_MAX"] = CAR_SPEED_MAX
 
+        self.instructions = {
+            "speed":self.speed,
+            "speed_delta":speed_delta,
+            "direction_radians":self.direction_radians,
+            "steering_radians":self.steering_radians,
+            "track_edge_distances":track_edge_distances
+            }
+        self.latestInstructions.appendleft(self.instructions)
 
     def GetTrackEdgeDistances(self, draw_lines):    
         car_on_track = self.track.track_pixels[self.position_rounded]
@@ -111,6 +202,7 @@ class Car():
             track_edge_distance = self.GetTrackEdgeDistance(vision_angle, draw_lines)
             track_edge_distances.append((vision_angle, track_edge_distance))
 
+        #if draw_lines is True:
         pygame.display.update()
         
         self.crashed = False
@@ -140,10 +232,12 @@ class Car():
     
     def DrawCrashedCar(self):
         pygame.draw.circle(self.screen, RED, self.position_rounded, TRACK_MAX_WIDTH, width=2)
-        pygame.display.update()
+        crash_zone = pygame.Rect(self.position_rounded[0] - TRACK_MAX_WIDTH, self.position_rounded[1] - TRACK_MAX_WIDTH, 2 * TRACK_MAX_WIDTH, 2 * TRACK_MAX_WIDTH)
+        pygame.display.update(crash_zone)
 
 class Track():
-    def __init__(self, screen) -> None:
+    def __init__(self, window, screen) -> None:
+        self.window = window
         self.screen = screen
         self.track = []
         self.scaled_track = []
@@ -252,7 +346,7 @@ class Track():
         self.scaled_track = [[t[0] * SQUARE_SIZE,t[1] * SQUARE_SIZE] for t in self.track]
 
     def DrawTrackStart(self):
-        pygame.draw.circle(self.screen, START_COLOUR, self.scaled_track[0], TRACK_MAX_WIDTH)
+        pygame.draw.circle(self.screen, START_COLOUR, self.scaled_track[0], TRACK_MAX_WIDTH + 5)
 
     def DrawTrack(self):
         pygame.draw.lines(self.screen, BLACK, True, self.scaled_track, 1)
@@ -296,15 +390,14 @@ class Track():
         self.track_widths = track_width
     
     def SetTrackPixels(self):
-        # draw the track in lots of red circles on a black background
-        self.screen.fill(BLACK)
+        # draw the track in lots of red circles on a black surface
+        surf = pygame.Surface(self.window)
+        surf.fill(BLACK)
         for i in range(0, len(self.interpolated_scaled_track)):
-            pygame.draw.circle(self.screen, RED, self.interpolated_scaled_track[i], self.track_widths[i])
-
-        pygame.display.update()
+            pygame.draw.circle(surf, RED, self.interpolated_scaled_track[i], self.track_widths[i])
         
         # get an array from the screen identifying where the track is
-        tp = pygame.surfarray.array_red(self.screen)
+        tp = pygame.surfarray.array_red(surf)
         # reduce this down to an array of booleans where 255 becomes True
         self.track_pixels = tp.astype(dtype=bool)
 
@@ -319,38 +412,62 @@ class Track():
             pygame.draw.circle(self.screen, BLACK, self.interpolated_scaled_track[i], self.track_widths[i])
             
         # draw track centre line
-        for t in self.scaled_track:
-            self.screen.set_at((round(t[0]),round(t[1])), TRACK_MIDLINE_COLOUR)
-
-        pygame.display.update()
+        #for t in self.scaled_track:
+        #    self.screen.set_at((round(t[0]),round(t[1])), TRACK_MIDLINE_COLOUR)
 
     def GetInitialDirectionRadians(self):
         initial_angle = math.atan2(self.track[1][1]-self.track[0][1], self.track[1][0]-self.track[0][0])
         return initial_angle
 
+def StatsUpdate(statsSurface, statsInfo):
+    statsSurface.fill((0, 0, 0, 0))
+    font = pygame.font.SysFont('Arial', 12, bold=False)
+    textTop = 0
+    for k,v in statsInfo.items():
+        img = font.render(k + ': ' + str(round(v)), True,
+                  pygame.Color(BLACK),
+                  pygame.Color(WHITE))
+        imgSize = img.get_size()
+        textTop += imgSize[1] + 10
+        statsSurface.blit(img, (10,textTop))
+
 # define a main function
-def main():     
+def main():
+    # https://stackoverflow.com/questions/18002794/local-variable-referenced-before-assignment
+    global CAR_SPEED_MIN
+    global CAR_SPEED_MAX
+
     # initialize the pygame module
     pygame.init()
+    clock = pygame.time.Clock()
     # load and set the logo
     logo = pygame.image.load("logo32x32.png")
     pygame.display.set_icon(logo)
     pygame.display.set_caption("AI car")
+    
+    window = (WINDOW_WIDTH,WINDOW_HEIGHT)
      
     # create a surface on screen that has the size defined globally
-    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-
+    screen = pygame.display.set_mode(window)
+    background = pygame.Surface(window)
+    statsSurface = pygame.Surface(window)
+    statsSurface = statsSurface.convert_alpha()
+    statsSurface.fill((0, 0, 0, 0))
+    
     # define a variable to control the main loop
     running = True
+    paused = False
     newTrackAndCarNeeded = True
 
     # main loop
     while running:
         if newTrackAndCarNeeded:
-            track = Track(screen)
+            # create the track and draw it on the background
+            CAR_SPEED_MIN = CAR_SPEED_MIN_INITIAL # pixels per frame
+            CAR_SPEED_MAX = CAR_SPEED_MAX_INITIAL # pixels per frame
+            track = Track(window, background)
             track.Create()
-
-            car = Car(screen, track)
+            car = Car(background, track)            
             newTrackAndCarNeeded = False
 
         # event handling, gets all event from the event queue
@@ -363,20 +480,46 @@ def main():
                 sys.exit()
                 break
             
-            if event.type == pygame.MOUSEBUTTONDOWN:
-                # get the mouse position
-                mouse_pos = pygame.mouse.get_pos()
-                car.position = mouse_pos
-                car.GetTrackEdgeDistances(True)
-                continue
+            #if event.type == pygame.MOUSEBUTTONDOWN:
+            #    # get the mouse position
+            #    mouse_pos = pygame.mouse.get_pos()
+            #    car.position = mouse_pos
+            #    car.GetTrackEdgeDistances(True)
+            #    continue
 
-            if event.type == pygame.TEXTINPUT:
-                if event.text == 'n':
+            # for the next bit, on windows, you need to:
+            # pip install windows-curses
+            # https://stackoverflow.com/questions/35850362/importerror-no-module-named-curses-when-trying-to-import-blessings
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_n:
                     newTrackAndCarNeeded = True
                     continue
+                elif event.key == pygame.K_ESCAPE:
+                    running = False
+                    pygame.quit
+                    sys.exit()
+                    break
+                elif event.key == pygame.K_SPACE:
+                    paused = not paused
+                elif event.key == pygame.K_RIGHT:
+                    CAR_SPEED_MIN += 1
+                    CAR_SPEED_MAX += 1
+                elif event.key == pygame.K_LEFT:
+                    CAR_SPEED_MIN -= 1
+                    CAR_SPEED_MAX -= 1
         
+        if paused:
+             continue
+
         if not car.crashed:
             car.Drive()
+            StatsUpdate(statsSurface, car.statsInfo)   
+        
+        screen.blit(background, (0,0))
+        car.carIconGroup.draw(screen)
+        screen.blit(statsSurface, (0,0))
+        pygame.display.flip()
+        clock.tick(200)
 
 # run the main function only if this module is executed as the main script
 # (if you import this as a module then nothing is executed)
