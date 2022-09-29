@@ -1,15 +1,24 @@
 # import the pygame module, so you can use it
-import pygame
-import numpy as np
 import random
+
+import numpy as np
+import pygame
+from matplotlib import pyplot as plt
+from scipy.interpolate import splev, splprep
+from scipy.ndimage.filters import uniform_filter1d
+
+#import array
 
 BLACK = (0, 0, 0)
 WHITE = (200, 200, 200)
-SQUARE_SIZE = 80
-ROWS = 8
-COLS = 10
-TRACK_WIDTH = 10
+START_COLOUR = (200, 200, 0)
+SQUARE_SIZE = 150
+ROWS = 5
+COLS = 8
+TRACK_WIDTH = 20
 TRACK_DRAWING_DELAY = 100
+TRACK_CURVE_POINTS = ROWS * COLS * 10
+TRACK_POINT_COLOUR = (200, 0, 0)
 
 WINDOW_WIDTH = COLS * SQUARE_SIZE
 WINDOW_HEIGHT = ROWS * SQUARE_SIZE
@@ -54,8 +63,9 @@ def create_grid(screen):
         # loop though the shuffled_indices until a segment can be expanded or all have been tried
         track_expanded = False
         
-        draw_track(screen, track)
-        pygame.time.delay(TRACK_DRAWING_DELAY)
+        # watch the track expand by drawing it on each loop and having a delay
+        #draw_track(screen, track)
+        #pygame.time.delay(TRACK_DRAWING_DELAY)
 
         for track_segment_start_index in shuffled_indices:
             track_segment_end_index = track_segment_start_index + 1
@@ -111,16 +121,74 @@ def create_grid(screen):
         if not track_expanded:
             expand_track = False
     
-    draw_track(screen, track)
-
-def draw_track(screen, track):
-    screen.fill(BLACK)
+    
     scaled_track = [[t[0] * SQUARE_SIZE,t[1] * SQUARE_SIZE] for t in track]
-    pygame.draw.lines(screen, WHITE, True, scaled_track, TRACK_WIDTH)
-    pygame.display.update()
+    
+    #draw_track(screen, scaled_track)
+    draw_start(screen, scaled_track)
+    draw_interpolated_track(screen, scaled_track)
+
+def draw_track(screen, scaled_track):
+    pygame.draw.lines(screen, BLACK, True, scaled_track, 1)
+    #pygame.display.update()
+
+def draw_start(screen, scaled_track):
+    pygame.draw.circle(screen, START_COLOUR, scaled_track[0], 3*TRACK_WIDTH)
+    #pygame.display.update()
+
+def draw_interpolated_track(screen, scaled_track):
+    # https://stackoverflow.com/questions/31464345/fitting-a-closed-curve-to-a-set-of-points
+    
+    # loop the track back round to the strart
+    scaled_track = scaled_track + [scaled_track[0]]
+
+    # change the list of coordinates to a numpy array
+    pts = np.array(scaled_track)
+
+    # magic happens
+    tck, u = splprep(pts.T, u=None, s=0.0, per=1) 
+    u_new = np.linspace(u.min(), u.max(), TRACK_CURVE_POINTS)
+    x_new, y_new = splev(u_new, tck, der=0)
+
+    scaled_track = [list(a) for a in zip(x_new , y_new)]
+
+    #pygame.draw.lines(screen, BLACK, True, scaled_track, TRACK_WIDTH)
+    #for i in range(0, len(scaled_track)-1):
+    #   pygame.draw.line(screen, BLACK, scaled_track[i], scaled_track[i+1], TRACK_WIDTH)
+    
+    #pygame.display.update()
+
+    x = np.linspace(0, TRACK_CURVE_POINTS, TRACK_CURVE_POINTS)
+
+    def f(x):
+        y = 0
+        result = []
+        for _ in x:
+            result.append(y)
+            y += np.random.normal(scale=1)
+        return np.array(result)
+
+    def runningMean(x, N):
+        return np.convolve(x, np.ones((N,))/N)[(N-1):]
+
+    def NormalizeData(data):
+        return (data - np.min(data)) / (np.max(data) - np.min(data))
+
+    #track_width = runningMean(f(x), 10)
+    track_width = uniform_filter1d(f(x), size=20)
+    track_width = TRACK_WIDTH * NormalizeData(track_width) + TRACK_WIDTH
+    plt.plot(x, track_width)
+
+    for i in range(0, len(scaled_track)):
+        pygame.draw.circle(screen, BLACK, scaled_track[i], track_width[i])
+
+
+    
+    for t in scaled_track:
+        screen.set_at((round(t[0]),round(t[1])), TRACK_POINT_COLOUR)
 
 def draw(screen):
-    screen.fill(BLACK)
+    screen.fill(WHITE)
     create_grid(screen)
     pygame.display.update()
 
