@@ -1,16 +1,17 @@
 # import the pygame module, so you can use it
-import random
-
-import numpy as np
 import pygame
-from matplotlib import pyplot as plt
-from scipy.interpolate import splev, splprep
+import numpy as np
+import random
+import math
+from scipy.interpolate import splprep, splev
 from scipy.ndimage.filters import uniform_filter1d
-
+from matplotlib import pyplot as plt
+from PIL import Image
 #import array
 
 BLACK = (0, 0, 0)
 WHITE = (200, 200, 200)
+RED = (255, 0, 0)
 START_COLOUR = (200, 200, 0)
 SQUARE_SIZE = 150
 ROWS = 5
@@ -22,6 +23,16 @@ TRACK_POINT_COLOUR = (200, 0, 0)
 
 WINDOW_WIDTH = COLS * SQUARE_SIZE
 WINDOW_HEIGHT = ROWS * SQUARE_SIZE
+
+# cars can only look so far ahead. Needs to be somewhat larger than the maximum track width - try seting that distance to the size of a grid square
+CAR_VISION_DISTANCE = 2 * SQUARE_SIZE
+CAR_VISION_ANGLES = [-90, -45, -20, 0, 20, 45, 90]
+
+class Car():
+  def __init__(self, position, velocity):
+    self.position = position
+    self.velocity = velocity
+    self.crashed = False
 
 def create_grid(screen):
     # python version of the answer to this 
@@ -125,8 +136,9 @@ def create_grid(screen):
     scaled_track = [[t[0] * SQUARE_SIZE,t[1] * SQUARE_SIZE] for t in track]
     
     #draw_track(screen, scaled_track)
-    draw_start(screen, scaled_track)
-    draw_interpolated_track(screen, scaled_track)
+    #draw_start(screen, scaled_track)
+    track_pixels = draw_interpolated_track(screen, scaled_track)
+    return track_pixels
 
 def draw_track(screen, scaled_track):
     pygame.draw.lines(screen, BLACK, True, scaled_track, 1)
@@ -168,29 +180,89 @@ def draw_interpolated_track(screen, scaled_track):
             y += np.random.normal(scale=1)
         return np.array(result)
 
-    def runningMean(x, N):
-        return np.convolve(x, np.ones((N,))/N)[(N-1):]
-
     def NormalizeData(data):
         return (data - np.min(data)) / (np.max(data) - np.min(data))
 
-    #track_width = runningMean(f(x), 10)
     track_width = uniform_filter1d(f(x), size=20)
     track_width = TRACK_WIDTH * NormalizeData(track_width) + TRACK_WIDTH
-    plt.plot(x, track_width)
+    #plt.plot(x, track_width)
+
+    # draw the track in lots of red circles on black    
+    screen.fill(BLACK)
+    for i in range(0, len(scaled_track)):
+        pygame.draw.circle(screen, RED, scaled_track[i], track_width[i])
+
+    pygame.display.update()
+    
+    # get an array from the screen identifying where the track is
+    tp = pygame.surfarray.array_red(screen)
+    #reduce this down to an array of booleans where 255 becomes True
+    tp = tp.astype(dtype=bool)
+
+    # now make the track look nice
+    screen.fill(WHITE)
+
+    draw_start(screen, scaled_track)
 
     for i in range(0, len(scaled_track)):
         pygame.draw.circle(screen, BLACK, scaled_track[i], track_width[i])
-
-
-    
+        
+    # draw track centre line
     for t in scaled_track:
         screen.set_at((round(t[0]),round(t[1])), TRACK_POINT_COLOUR)
 
+    pygame.display.update()
+
+    return tp
+
+def getTrackEdgeDistance(screen, track_pixels, car_x, car_y, car_angle, vision_angle, draw_line):
+    # from x,y follow a line at vision_angle until no longer on the track
+    # or until CAR_VISION_DISTANCE has been reached
+    search_angle_radians = math.radians(car_angle + vision_angle)
+    delta_x = math.cos(search_angle_radians)
+    delta_y = math.sin(search_angle_radians)
+
+    test_x = car_x
+    test_y = car_y
+    edge_distance = 0
+
+    for i in range(1, CAR_VISION_DISTANCE):
+        edge_distance = i
+        test_x += delta_x
+        test_y += delta_y
+        if track_pixels[round(test_x)][round(test_y)] == False:
+            break
+    
+    if draw_line:
+        pygame.draw.line(screen, RED, [car_x, car_y], [round(test_x), round(test_y)])
+
+    return edge_distance
+
+def CarMeasurements(screen, track_pixels, mouse_pos):    
+    car_on_track = track_pixels[mouse_pos]
+    if not car_on_track:
+        return False
+
+    car_x = mouse_pos[0]
+    car_y = mouse_pos[1]
+
+    # for now, randomly set the angle of the car
+    car_angle = random.randint(1,360)
+
+    # plot points
+    track_edge_distances = []
+
+    for vision_angle in CAR_VISION_ANGLES:
+        track_edge_distance = getTrackEdgeDistance(screen, track_pixels, car_x, car_y, car_angle, vision_angle, True)
+        track_edge_distances.append([vision_angle, track_edge_distance])
+
+    pygame.display.update()
+    return True
+
 def draw(screen):
     screen.fill(WHITE)
-    create_grid(screen)
-    pygame.display.update()
+    track_pixels = create_grid(screen)
+    return track_pixels
 
 # define a main function
 def main():
@@ -208,7 +280,7 @@ def main():
     # define a variable to control the main loop
     running = True
     
-    draw(screen)
+    track_pixels = draw(screen)
 
     # main loop
     while running:
@@ -219,10 +291,17 @@ def main():
                 # change the value to False, to exit the main loop
                 running = False
                 break
+            
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                # get the mouse position
+                mouse_pos = pygame.mouse.get_pos()
+                CarMeasurements(screen, track_pixels, mouse_pos)
+                continue
 
             if event.type == pygame.TEXTINPUT:
                 if event.text == 'n':
-                    draw(screen)    
+                    track_pixels = draw(screen)
+                    continue
 
 # run the main function only if this module is executed as the main script
 # (if you import this as a module then nothing is executed)
