@@ -1,37 +1,36 @@
 # import the pygame module, so you can use it
 from asyncio.windows_events import NULL
-import pygame
+import pygame, sys
 import numpy as np
 import random
 import math
 from scipy.interpolate import splprep, splev
 from scipy.ndimage.filters import uniform_filter1d
-from matplotlib import pyplot as plt
-from PIL import Image
-#import array
 
 BLACK = (0, 0, 0)
 WHITE = (200, 200, 200)
 RED = (255, 0, 0)
 START_COLOUR = (200, 200, 0)
-SQUARE_SIZE = 150
-ROWS = 5
-COLS = 8
-TRACK_MIN_WIDTH = 20
-TRACK_DRAWING_DELAY = 100
+SQUARE_SIZE = 130
+ROWS = 6
+COLS = 10
+TRACK_MIN_WIDTH = 15
+TRACK_MAX_WIDTH = 45
 TRACK_CURVE_POINTS = ROWS * COLS * 10
-TRACK_POINT_COLOUR = (200, 0, 0)
+TRACK_MIDLINE_COLOUR = WHITE
 
 WINDOW_WIDTH = COLS * SQUARE_SIZE
 WINDOW_HEIGHT = ROWS * SQUARE_SIZE
 
 # cars can only look so far ahead. Needs to be somewhat larger than the maximum track width - try seting that distance to the size of a grid square
-CAR_VISION_DISTANCE = 2 * SQUARE_SIZE
-CAR_VISION_ANGLES = [0, -20, 20, -45, 45, -90, 90]
-CAR_SPEED_MIN = 3 # pixels per frame
-CAR_SPEED_MAX = 10 # pixels per frame
-CAR_ACCELERATION_MIN = -2 # change in speed in pixels per frame
+CAR_VISION_DISTANCE = round(2.5 * SQUARE_SIZE)
+#CAR_VISION_ANGLES = (0, -10, 10, -20, 20, -30, 30, -45, 45, -60, 60, -80, 80, -90, 90) # 0 must be first
+CAR_VISION_ANGLES = (0, -20, 20, -45, 45, -60, 60, -90, 90) # 0 must be first
+CAR_SPEED_MIN = 2 # pixels per frame
+CAR_SPEED_MAX = 15 # pixels per frame
+CAR_ACCELERATION_MIN = -4 # change in speed in pixels per frame
 CAR_ACCELERATION_MAX = 2 # change in speed in pixels per frame
+CAR_PATH_COLOUR = RED
         
 class Car():
     def __init__(self, screen, track):
@@ -46,7 +45,10 @@ class Car():
         #else:
         #    raise (TypeError, "expected a tuple")
         
+        # actual position is recorded as a tuple of floats
+        # position is rounded just for display and to see if the car is still on the track
         self.position = (self.track.scaled_track[0][0],self.track.scaled_track[0][1]) #this should be a tuple of integers. interpolated_scaled_track[0] will be float
+        self.position_rounded = (round(self.position[0]),round(self.position[1]))
         self.speed = SQUARE_SIZE/50  # pixels per frame
         self.direction_radians = track.GetInitialDirectionRadians()
         self.steering_radians = 0
@@ -56,10 +58,9 @@ class Car():
         track_edge_distances = self.GetTrackEdgeDistances(False)
         if self.crashed:
             return
-        # do some neural network magic to decide how much to steer and how much to change speed
-
-        # get the change in speed, based on how clear the road is straight ahead
-        distance_ahead = track_edge_distances[0][1]
+        # in future, do some neural network magic to decide how much to steer and how much to change speed
+        # for now, get the change in speed, based on how clear the road is straight ahead
+        distance_ahead = track_edge_distances[0][1] # how far is clear straight ahead
         speed_delta = 4 * (distance_ahead/CAR_VISION_DISTANCE) - 2
 
         if speed_delta < CAR_ACCELERATION_MIN:
@@ -78,36 +79,37 @@ class Car():
         
         self.speed = speed_new
 
-        steering_radians_new = 0
-        if distance_ahead < CAR_VISION_DISTANCE/2:
-        
-            for thing in track_edge_distances:
-                if thing[0] == 0:
+        steering_angle_new = 0
+        if distance_ahead < CAR_VISION_DISTANCE / 1.8:        
+            for ted in track_edge_distances:
+                if ted[0] == 0:
                     continue
-                steering_radians_new += thing[1]/(30 * thing[0])
+                steering_angle_new += ted[1] / ted[0]
 
-        self.steering_radians = steering_radians_new
-        self.direction_radians += self.steering_radians * self.speed # direction changes more per frame if you're goig faster
+        self.steering_radians = steering_angle_new / 20
+        self.direction_radians += self.steering_radians #* self.speed # direction changes more per frame if you're goig faster
 
-        self.position = (round(self.position[0] + self.speed * math.cos(self.direction_radians)), round(self.position[1] + self.speed * math.sin(self.direction_radians)))
+        self.position = (self.position[0] + self.speed * math.cos(self.direction_radians), self.position[1] + self.speed * math.sin(self.direction_radians))
+        self.position_rounded = (round(self.position[0]),round(self.position[1]))    
 
-
-        self.screen.set_at(self.position, RED)
-
+        car_speed_colour = round(255 * self.speed / CAR_SPEED_MAX)
+        car_colour = (255 - car_speed_colour, car_speed_colour, 0)
+        self.screen.set_at(self.position_rounded, car_colour)
 
 
     def GetTrackEdgeDistances(self, draw_lines):    
-        car_on_track = self.track.track_pixels[self.position]
+        car_on_track = self.track.track_pixels[self.position_rounded]
         if not car_on_track:
             self.crashed = True
+            self.DrawCrashedCar()
             return NULL
 
-        # plot points
+        # list of tuples: [(angle,distance)]
         track_edge_distances = []
 
         for vision_angle in CAR_VISION_ANGLES:
             track_edge_distance = self.GetTrackEdgeDistance(vision_angle, draw_lines)
-            track_edge_distances.append([vision_angle, track_edge_distance])
+            track_edge_distances.append((vision_angle, track_edge_distance))
 
         pygame.display.update()
         
@@ -121,8 +123,7 @@ class Car():
         delta_x = math.cos(search_angle_radians)
         delta_y = math.sin(search_angle_radians)
 
-        test_x = self.position[0]
-        test_y = self.position[1]
+        test_x, test_y = self.position_rounded
         edge_distance = 0
 
         for i in range(1, CAR_VISION_DISTANCE):
@@ -133,9 +134,13 @@ class Car():
                 break
         
         if draw_line:
-            pygame.draw.line(self.screen, RED, self.position, [round(test_x), round(test_y)])
+            pygame.draw.line(self.screen, RED, self.position_rounded, [round(test_x), round(test_y)])
 
         return edge_distance
+    
+    def DrawCrashedCar(self):
+        pygame.draw.circle(self.screen, RED, self.position_rounded, TRACK_MAX_WIDTH, width=2)
+        pygame.display.update()
 
 class Track():
     def __init__(self, screen) -> None:
@@ -163,7 +168,7 @@ class Track():
         start_col = random.randint(1, ROWS-2)
         
         # create a list of the coordinates of 4 central points that make up a square
-        track = [[start_row,start_col],[start_row+1,start_col],[start_row+1,start_col+1],[start_row,start_col+1]]
+        track = [(start_row,start_col),(start_row+1,start_col),(start_row+1,start_col+1),(start_row,start_col+1)]
         
         # create 2D array of booleans for the vertices in the grid
         # Elements will be set to True to indicate the vertex is part of the track and so the track can't be expanded into it
@@ -183,11 +188,10 @@ class Track():
 
         # set the grid vertices for the starting square of track
         for track_vertex in track:
-            grid_vertices[track_vertex[0],track_vertex[1]] = True
+            grid_vertices[track_vertex] = True
 
         # keep expanding the track until it won't expand any more
-        expand_track = True
-        while expand_track:
+        while True:
             # get a random track segment to expand but, if that won't expand, need to get another until all have been tested.
             # so, get a randomly sorted list of indices and work through the segments indexed by them until a segment can be expanded or none can be expanded and end the loop
             track_len = len(track)
@@ -195,12 +199,6 @@ class Track():
             random.shuffle(shuffled_indices)
 
             # loop though the shuffled_indices until a segment can be expanded or all have been tried
-            track_expanded = False
-            
-            # watch the track expand by drawing it on each loop and having a delay
-            #draw_track(screen, track)
-            #pygame.time.delay(TRACK_DRAWING_DELAY)
-
             for track_segment_start_index in shuffled_indices:
                 track_segment_end_index = track_segment_start_index + 1
                 if track_segment_end_index > track_len-1:
@@ -209,11 +207,9 @@ class Track():
                 track_segment_start = track[track_segment_start_index]
                 track_segment_end = track[track_segment_end_index]
 
-                track_segment_start_x = track_segment_start[0]
-                track_segment_start_y = track_segment_start[1]
-                track_segment_end_x = track_segment_end[0]
-                track_segment_end_y = track_segment_end[1]
-
+                track_segment_start_x, track_segment_start_y = track_segment_start
+                track_segment_end_x, track_segment_end_y = track_segment_end
+                
                 # the track started off going round clockwise and so always will
                 # the track should expand outwards, which is always to the left of the current track segment (when looking from the start of the segment to the end of it)
                 # coordinates start (0,0) at the top left
@@ -225,15 +221,15 @@ class Track():
                 delta_x = track_segment_end_y - track_segment_start_y
                 delta_y = track_segment_start_x - track_segment_end_x
                 
-                track_vertex_extra_1 = [track_segment_start_x + delta_x, track_segment_start_y + delta_y]
+                track_vertex_extra_1 = (track_segment_start_x + delta_x, track_segment_start_y + delta_y)
                 # check if this is already in use
-                if grid_vertices[track_vertex_extra_1[0],track_vertex_extra_1[1]]:
+                if grid_vertices[track_vertex_extra_1]:
                     # in use, so can't expand this segment
                     continue
 
-                track_vertex_extra_2 = [track_segment_end_x + delta_x, track_segment_end_y + delta_y]
+                track_vertex_extra_2 = (track_segment_end_x + delta_x, track_segment_end_y + delta_y)
                 # check if this is already in use
-                if grid_vertices[track_vertex_extra_2[0],track_vertex_extra_2[1]]:
+                if grid_vertices[track_vertex_extra_2]:
                     # in use, so can't expand this segment
                     continue
 
@@ -242,18 +238,13 @@ class Track():
                 track[track_segment_end_index:track_segment_end_index] = [track_vertex_extra_1,track_vertex_extra_2]
 
                 # flag that the new vertices are part of the track
-                grid_vertices[track_vertex_extra_1[0],track_vertex_extra_1[1]] = True
-                grid_vertices[track_vertex_extra_2[0],track_vertex_extra_2[1]] = True
-
-                track_expanded = True
-                
+                grid_vertices[track_vertex_extra_1] = True
+                grid_vertices[track_vertex_extra_2] = True                
                 # if the track has been expanded at this segment, break from this loop
-                if track_expanded:
-                    break
-
-            # if the track wasn't expanded for any segment then stop trying to expand it any more
-            if not track_expanded:
-                expand_track = False
+                break
+            else:
+                # gone through all of the track segments and the track wasn't expanded, so stop trying to expand it any more
+                break
         
         self.track = track
 
@@ -261,7 +252,7 @@ class Track():
         self.scaled_track = [[t[0] * SQUARE_SIZE,t[1] * SQUARE_SIZE] for t in self.track]
 
     def DrawTrackStart(self):
-        pygame.draw.circle(self.screen, START_COLOUR, self.scaled_track[0], 3*TRACK_MIN_WIDTH)
+        pygame.draw.circle(self.screen, START_COLOUR, self.scaled_track[0], TRACK_MAX_WIDTH)
 
     def DrawTrack(self):
         pygame.draw.lines(self.screen, BLACK, True, self.scaled_track, 1)
@@ -283,8 +274,10 @@ class Track():
         self.interpolated_scaled_track = [list(a) for a in zip(x_new , y_new)]
 
     def SetTrackWidths(self):
-        # track width should vary from TRACK_MIN_WIDTH to twice that
-        # to get the width to vary smoothly but randomly, a random walk is created and then smoothed over 20 points, normalised to the range [0,1] and scaled by multiplying by TRACK_MIN_WIDTH
+        # track width should vary between TRACK_MIN_WIDTH to TRACK_MAX_WIDTH
+        # to get the width to vary smoothly but randomly, a random walk is created and then smoothed over 20 points, normalised to the range [0,1] and scaled
+        # the width starts at TRACK_MIN_WIDTH. If the end of the track is wide, it can cause problems with driving when it loops round to the narrow start.
+        # The list of widths could be halved in length and mirrored, so that the end is the same width as the start, but this makes for an extra challenge.
         x = np.linspace(0, TRACK_CURVE_POINTS, TRACK_CURVE_POINTS)
 
         def RandomWalk(x):
@@ -299,7 +292,7 @@ class Track():
             return (data - np.min(data)) / (np.max(data) - np.min(data))
 
         track_width = uniform_filter1d(RandomWalk(x), size=20)
-        track_width = TRACK_MIN_WIDTH * NormalizeData(track_width) + TRACK_MIN_WIDTH
+        track_width = (TRACK_MAX_WIDTH - TRACK_MIN_WIDTH) * NormalizeData(track_width) + TRACK_MIN_WIDTH
         self.track_widths = track_width
     
     def SetTrackPixels(self):
@@ -327,7 +320,7 @@ class Track():
             
         # draw track centre line
         for t in self.scaled_track:
-            self.screen.set_at((round(t[0]),round(t[1])), TRACK_POINT_COLOUR)
+            self.screen.set_at((round(t[0]),round(t[1])), TRACK_MIDLINE_COLOUR)
 
         pygame.display.update()
 
@@ -336,8 +329,7 @@ class Track():
         return initial_angle
 
 # define a main function
-def main():
-     
+def main():     
     # initialize the pygame module
     pygame.init()
     # load and set the logo
@@ -350,22 +342,25 @@ def main():
 
     # define a variable to control the main loop
     running = True
-
-    track = Track(screen)
-    track.Create()
-
-    car = Car(screen, track)
-    while not car.crashed:
-        car.Drive()
+    newTrackAndCarNeeded = True
 
     # main loop
     while running:
+        if newTrackAndCarNeeded:
+            track = Track(screen)
+            track.Create()
+
+            car = Car(screen, track)
+            newTrackAndCarNeeded = False
+
         # event handling, gets all event from the event queue
         for event in pygame.event.get():
             # only do something if the event is of type QUIT
             if event.type == pygame.QUIT:
                 # change the value to False, to exit the main loop
                 running = False
+                pygame.quit
+                sys.exit()
                 break
             
             if event.type == pygame.MOUSEBUTTONDOWN:
@@ -377,13 +372,11 @@ def main():
 
             if event.type == pygame.TEXTINPUT:
                 if event.text == 'n':
-                    track.Create()
-
-                    car = Car(screen, track)
-                    while not car.crashed:
-                        car.Drive()
-
+                    newTrackAndCarNeeded = True
                     continue
+        
+        if not car.crashed:
+            car.Drive()
 
 # run the main function only if this module is executed as the main script
 # (if you import this as a module then nothing is executed)
